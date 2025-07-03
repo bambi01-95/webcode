@@ -1,0 +1,149 @@
+%{
+;
+#define YYPARSE shica_compiler_parse
+#define YYSTYPE int
+
+YYSTYPE result;
+int shica_compiler_parse(void);
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+#include <ctype.h>
+
+/*
+FOR storing the web text
+This is a global variable that will hold the web text.
+
+*/
+char *WEBTEXT 	   = 0;
+int   WEBTEXT_SIZE = 0;
+int   WEBTEXT_POS  = 0;
+
+int store(const char* msg) {
+	// if(WEBTEXT){
+	// 	printf("Freeing previous WEBTEXT\n");
+	// 	free(WEBTEXT); // Free previous content if any
+	// }
+	WEBTEXT_SIZE = strlen(msg);
+	if (WEBTEXT_SIZE == 0) {
+		printf("WEBTEXT_SIZE is 0, returning\n");
+		return 0;
+	}
+    WEBTEXT = strdup(msg);
+	WEBTEXT_POS = 0; 
+	printf("end of store function\n");
+	return 1;
+}
+
+int getchar_from_text() {
+    if (!WEBTEXT || WEBTEXT[WEBTEXT_POS] == '\0') {
+        return -1; // EOF の代わり
+    }
+    return WEBTEXT[WEBTEXT_POS++];
+}
+
+int get_result(void){
+	printf("compile is %s\n",shica_compiler_parse()? "failed" : "succeeded");
+	printf("get_result called, = %d\n",result);
+	return result;
+}
+
+// This function is used to read characters from the web text.
+#define getchar getchar_from_text
+
+/*
+FOR COMPILE WEBTEXT
+*/
+
+int *variables = 0;
+
+struct Symbol {
+    char *name;
+    int   index;  // 0... generated for each new symbol name
+};
+
+typedef struct Symbol Symbol;
+
+int nextIndex = 0;
+
+Symbol **symbols = 0;
+int     nsymbols = 0;
+
+Symbol *newSymbol(char *name)
+{
+    Symbol *sym = calloc(1, sizeof(*sym));
+    sym->name  = strdup(name);
+    sym->index = nextIndex++;
+    return sym;
+}
+
+Symbol *intern(char *name)
+{
+    // linear search for existing symbol
+    for (int i = 0;  i < nsymbols;  ++i)
+	if (!strcmp(symbols[i]->name, name))
+	    return symbols[i];
+    symbols   = realloc(symbols,   sizeof(*symbols)   * (nsymbols + 1));
+    variables = realloc(variables, sizeof(*variables) * (nsymbols + 1));
+    return symbols[nsymbols++] = newSymbol(name);
+}
+
+
+
+%}
+
+start	= - x:expr ";"			{ result = x }
+
+expr	= assign
+
+assign  = i:id EQUAL x:expr		{ $$ = variables[i] = x }
+	| add
+
+add	= lhs:mul ( PLUS  rhs:mul	{ lhs += rhs }
+	  	  | MINUS rhs:mul	{ lhs -= rhs }
+	  	  )*			{ $$ = lhs }
+
+mul	= lhs:unary (  STAR  rhs:unary	{ lhs *= rhs }
+	  	     | SLASH rhs:unary	{ lhs /= rhs }
+	  	     | PCENT rhs:unary	{ lhs %= rhs }
+	  	     )*			{ $$ = lhs }
+
+unary   = MINUS lhs:unary		{ $$ = -lhs }
+	| PLING lhs:unary		{ $$ = !lhs }
+	| value
+
+value	= LPAR lhs:add RPAR		{ $$ =  lhs }
+	| integer
+	| i:id				{ $$ = variables[i] }
+
+integer	= < [0-9]+ > -  		{ $$ = atoi(yytext) }
+
+id	= < alpha alnum* > -		{ $$ = intern(yytext)->index }
+
+alpha	= [a-zA-Z_]
+alnum	= [a-zA-Z_0-9]
+
+-	= blank*
+
+blank	= [ \t\n\r]
+	| '//' (![\n\r] .)*
+
+EQUAL	= "=" -
+PLUS	= "+" -
+MINUS	= "-" -
+STAR	= "*" -
+SLASH	= "/" -
+PCENT	= "%" -
+LPAR	= "(" -
+RPAR	= ")" -
+PLING	= "!" -
+
+%%
+
+#include <stdio.h>
+int main(){
+	while(shica_compiler_parse() == 0) {
+		printf("Result: %d\n", result);
+	}
+	return 0;
+}

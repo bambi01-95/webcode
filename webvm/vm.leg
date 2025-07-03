@@ -1,0 +1,1029 @@
+%{
+
+/*
+FOR storing the web text
+This is a global variable that will hold the web text.
+
+*/
+
+#ifdef __EMSCRIPTEN__
+char *WEBTEXT 	   = 0;
+int   WEBTEXT_SIZE = 0;
+int   WEBTEXT_POS  = 0;
+
+int store(const char* msg) {
+	printf("store called with msg: %s\n", msg);
+	if(WEBTEXT){
+		printf("Freeing previous WEBTEXT\n");
+		free(WEBTEXT); // Free previous content if any
+	}
+	WEBTEXT_SIZE = strlen(msg);
+	if (WEBTEXT_SIZE == 0) {
+		printf("WEBTEXT_SIZE is 0, returning\n");
+		return 0;
+	}
+    WEBTEXT = strdup(msg);
+	WEBTEXT_POS = 0; 
+	printf("end of store function\n");
+	return 1;
+}
+
+int getchar_from_text() {
+    if (!WEBTEXT || WEBTEXT[WEBTEXT_POS] == '\0') {
+        return -1; // EOF の代わり
+    }
+    return WEBTEXT[WEBTEXT_POS++];
+}
+
+// This function is used to read characters from the web text.
+#define getchar getchar_from_text
+#endif
+
+
+
+
+
+
+
+
+// comment out one or both of the next two lines to disable tagged integers and/or floats
+
+#define TAGINT	1			// tag bits value for Integer  ........1
+#define TAGFLT	2			// tag bits value for Float    .......10
+
+#define TAGBITS 2			// how many bits to use for tag bits
+#define TAGMASK ((1 << TAGBITS) - 1)	// mask to extract just the tag bits
+
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+#include <ctype.h>
+#include <assert.h>
+#include <stdarg.h>
+#include <setjmp.h>
+#include <stdint.h>
+#include <unistd.h>
+
+void fatal(char *msg, ...)
+{
+    va_list ap;
+    va_start(ap, msg);
+    fprintf(stderr, "\n");
+    vfprintf(stderr, msg, ap);
+    fprintf(stderr, "\n");
+    va_end(ap);
+    exit(1);
+}
+
+union Object;
+typedef union Object Object;
+typedef Object *oop; // ordinary object pointer
+
+oop nil   = 0;
+oop false = 0;
+oop true  = 0;
+
+enum Type {
+    /*  0 */ Undefined = 0,
+    /*  1 */ Integer, Float, Symbol, Pair, Array, Closure, Function,
+    /*  8 */ Binop, Unyop, GetVar, SetVar, GetArray, SetArray,
+    /* 14 */ Call, Return, Break, Continue,
+    /* 18 */ Print, If, While, Block,
+};
+
+enum binop { ADD, SUB, MUL, DIV, MOD, LT, LE, GE, GT, EQ, NE, };
+enum unyop { NEG, NOT, };
+
+struct Undefined { enum Type _type; };
+struct Integer 	 { enum Type _type;  int _value;  };
+struct Symbol  	 { enum Type _type;  char *name;  oop value; };
+struct Pair  	 { enum Type _type;  oop a, b; };
+struct Array  	 { enum Type _type;  oop *elements;  int size, capacity; };
+struct Closure 	 { enum Type _type;  oop function, environment; };
+struct Function	 { enum Type _type;  oop parameters, body, code; };
+struct Binop   	 { enum Type _type;  enum binop op;  oop lhs, rhs; };
+struct Unyop   	 { enum Type _type;  enum unyop op;  oop rhs; };
+struct GetVar  	 { enum Type _type;  oop id; };
+struct SetVar  	 { enum Type _type;  oop id; oop rhs; };
+struct GetArray	 { enum Type _type;  oop array, index; };
+struct SetArray	 { enum Type _type;  oop array, index, value; };
+struct Call 	 { enum Type _type;  oop function, arguments; };
+struct Return 	 { enum Type _type;  oop value; };
+struct Break 	 { enum Type _type; };
+struct Continue	 { enum Type _type; };
+struct Print   	 { enum Type _type;  oop arguments; };
+struct If      	 { enum Type _type;  oop condition, statement1, statement2; };
+struct While   	 { enum Type _type;  oop condition, statement; };
+struct Block   	 { enum Type _type;  oop *statements;  int size; };
+
+union Object {
+    enum   Type     _type;
+    struct Integer  Integer;
+    struct Symbol   Symbol;
+    struct Pair     Pair;
+    struct Array    Array;
+    struct Closure  Closure;
+    struct Function Function;
+    struct Binop    Binop;
+    struct Unyop    Unyop;
+    struct GetVar   GetVar;
+    struct SetVar   SetVar;
+    struct GetArray GetArray;
+    struct SetArray SetArray;
+    struct Call     Call;
+    struct Return   Return;
+    struct Break    Break;
+    struct Continue Continue;
+    struct Print    Print;
+    struct If       If;
+    struct While    While;
+    struct Block    Block;
+};
+
+int getType(oop o)
+{
+#if TAGINT
+    if ((((intptr_t)o) & TAGMASK) == TAGINT) return Integer;
+#endif
+#if TAGFLT
+    if ((((intptr_t)o) & TAGMASK) == TAGFLT) return Float;
+#endif
+    return o->_type;
+}
+
+oop _check(oop node, enum Type type, char *file, int line)
+{
+    if (getType(node) != type) {
+	fprintf(stderr, "\n%s:%d: expected type %d got type %d\n", file, line, type, getType(node));
+	exit(1);
+    }
+    return node;
+}
+
+#define get(PTR, TYPE, FIELD)	(_check((PTR), TYPE, __FILE__, __LINE__)->TYPE.FIELD)
+
+int nobj = 0;
+
+oop _newObject(size_t size, enum Type type)
+{
+    nobj++;
+    oop node = calloc(1, size);
+    node->_type = type;
+    return node;
+}
+
+#define newObject(TYPE)	_newObject(sizeof(struct TYPE), TYPE)
+
+oop newInteger(int value)
+{
+#if TAGINT
+    return (oop)(((intptr_t)value << TAGBITS) | TAGINT);
+#else
+    oop node = newObject(Integer);
+    node->Integer._value = value;
+    return node;
+#endif
+}
+
+int Integer_value(oop obj)
+{
+#if TAGINT
+    assert(Integer == getType(obj));
+    return (intptr_t)obj >> TAGBITS;
+#else
+    return get(obj, Integer,_value);
+#endif
+}
+
+oop newFloat(double value)
+{
+#if TAGFLT
+    union { double d;  intptr_t i; } u = { .d = value };
+    return (oop)(((intptr_t)u.i & ~TAGMASK) | TAGFLT);
+#else
+    oop node = newObject(Float);
+    node->Float._value = value;
+    return node;
+#endif
+}
+
+double Float_value(oop obj)
+{
+#if TAGFLT
+    assert(Float == getType(obj));
+    union { intptr_t i;  double d; } u = { .i = (intptr_t)obj };
+    return u.d;
+#else
+    return get(obj, Float,_value);
+#endif
+}
+
+oop newSymbol(char *name)
+{
+    oop sym = newObject(Symbol);
+    sym->Symbol.name  = strdup(name);
+    sym->Symbol.value = false;
+    return sym;
+}
+
+oop *symbols = 0;
+int nsymbols = 0;
+ 
+oop intern(char *name)
+{
+    // binary search for existing symbol
+    int lo = 0, hi = nsymbols - 1;
+    while (lo <= hi) {
+	int mid = (lo + hi) / 2;
+	int cmp = strcmp(name, get(symbols[mid], Symbol,name));
+	if      (cmp < 0) hi = mid - 1;
+	else if (cmp > 0) lo = mid + 1;
+	else    return symbols[mid];
+    }
+    symbols   = realloc(symbols,   sizeof(*symbols)   * (nsymbols + 1));
+    memmove(symbols + lo + 1,
+	    symbols + lo,
+	    sizeof(*symbols) * (nsymbols++ - lo));
+    return symbols[lo] = newSymbol(name);
+}
+
+void printlnObject(oop node, int indent);
+
+oop newPair(oop a, oop b)
+{
+    oop obj = newObject(Pair);
+    obj->Pair.a = a;
+    obj->Pair.b = b;
+    return obj;
+}
+
+oop newArray(int size)
+{
+    oop obj = newObject(Array);
+    if (size) {
+	obj->Array.elements = calloc(size, sizeof(oop));
+	obj->Array.size     = size;
+	obj->Array.capacity = size;
+	for (int i = 0;  i < size;  ++i)
+	    obj->Array.elements[i]= nil;
+    }
+    return obj;
+}
+
+oop Array_grow(oop array)
+{
+    int size  = get(array, Array,size);
+    int cap   = get(array, Array,capacity);
+    oop *elts = get(array, Array,elements);
+    while (size >= cap) {
+	cap = cap ? cap * 2 : 4;
+	elts = realloc(elts, sizeof(*elts) * cap);
+    }
+    get(array, Array,capacity) = cap;
+    get(array, Array,elements) = elts;
+    return array;
+}
+
+oop Array_append(oop array, oop element)
+{
+    int size = get(array, Array,size);
+    if (size >= get(array, Array,capacity)) Array_grow(array);
+    get(array, Array,elements)[size++] = element;
+    get(array, Array,size) = size;
+    return element;
+}
+
+oop Array_last(oop array)
+{
+    int size = get(array, Array,size);
+    if (size == 0) fatal("last: array is empty");
+    return get(array, Array,elements)[size-1];
+}
+
+oop Array_pop(oop array)
+{
+    int size = get(array, Array,size);
+    if (size == 0) fatal("pop: array is empty");
+    oop element = get(array, Array,elements)[--size];
+    get(array, Array,size) = size;
+    return element;
+}
+
+oop newClosure(oop func, oop env)
+{
+    oop node = newObject(Closure);
+    node->Closure.function    = func;
+    node->Closure.environment = env;
+    return node;
+}
+
+oop newFunction(oop parameters, oop body)
+{
+    oop node = newObject(Function);
+    node->Function.parameters = parameters;
+    node->Function.body       = body;
+    node->Function.code       = nil;
+    return node;
+}
+
+oop newBinop(enum binop op, oop lhs, oop rhs)
+{
+    oop node = newObject(Binop);
+    node->Binop.op  = op;
+    node->Binop.lhs = lhs;
+    node->Binop.rhs = rhs;
+    return node;
+}
+
+oop newUnyop(enum unyop op, oop rhs)
+{
+    oop node = newObject(Unyop);
+    node->Unyop.op  = op;
+    node->Unyop.rhs = rhs;
+    return node;
+}
+
+oop newGetVar(oop id)
+{
+    oop node = newObject(GetVar);
+    node->GetVar.id = id;
+    return node;
+}
+
+oop newSetVar(oop id, oop rhs)
+{
+    oop node = newObject(SetVar);
+    node->SetVar.id  = id;
+    node->SetVar.rhs = rhs;
+    return node;
+}
+
+oop newGetArray(oop array, oop index)
+{
+    oop node = newObject(GetArray);
+    node->GetArray.array = array;
+    node->GetArray.index = index;
+    return node;
+}
+
+oop newSetArray(oop array, oop index, oop value)
+{
+    oop node = newObject(SetArray);
+    node->SetArray.array = array;
+    node->SetArray.index = index;
+    node->SetArray.value = value;
+    return node;
+}
+
+oop newCall(oop arguments, oop function)
+{
+    oop node = newObject(Call);
+    node->Call.arguments = arguments;
+    node->Call.function  = function;
+    return node;
+}
+
+oop newReturn(oop value)
+{
+    oop node = newObject(Return);
+    node->Return.value = value;
+    return node;
+}
+
+oop newBreak(void)
+{
+    return newObject(Break);
+}
+
+oop newContinue(void)
+{
+    return newObject(Continue);
+}
+
+oop newPrint(oop arguments)
+{
+    oop node = newObject(Print);
+    node->Print.arguments = arguments;
+    return node;
+}
+
+oop newIf(oop condition, oop s1, oop s2)
+{
+    oop node = newObject(If);
+    node->If.condition = condition;
+    node->If.statement1 = s1;
+    node->If.statement2 = s2;
+    return node;
+}
+
+oop newWhile(oop condition, oop s)
+{
+    oop node = newObject(While);
+    node->While.condition = condition;
+    node->While.statement = s;
+    return node;
+}
+
+oop newBlock(void)
+{
+    oop node = newObject(Block);
+    node->Block.statements = 0;
+    node->Block.size = 0;
+    return node;
+}
+
+void Block_append(oop b, oop s)
+{
+    oop *ss = get(b, Block,statements);
+    int  sz = get(b, Block,size);
+    ss = realloc(ss, sizeof(oop) * (sz + 1));
+    ss[sz++] = s;
+    get(b, Block,statements) = ss;
+    get(b, Block,size) = sz;
+}
+
+void printlnObject(oop node, int indent)
+{
+    printf("%*s", indent*2, "");
+    switch (getType(node)) {
+	case Undefined:	printf("nil\n");				break;
+	case Integer:	printf("%d\n", Integer_value(node));		break;
+
+	case Symbol:	printf("%s\n", get(node, Symbol,name));		break;
+	case Pair: {
+	    printf("Pair\n");
+	    printlnObject(get(node, Pair,a), indent+1);
+	    printlnObject(get(node, Pair,b), indent+1);
+	    break;
+	}
+	case Array: {
+	    printf("Array\n");
+	    for (int i = 0;  i < get(node, Array,size);  ++i)
+		printlnObject(get(node, Array,elements)[i], indent+1);
+	    break;
+	}
+	case Closure: {
+	    printf("Closure\n");
+	    printlnObject(get(node, Closure,function), indent+1);
+	    break;
+	}
+	case Function: {
+	    printf("function()\n");
+	    printlnObject(get(node, Function,parameters), indent+2);
+	    printlnObject(get(node, Function,body), indent+1);
+	    break;
+	}
+	case Binop: {
+	    switch (get(node, Binop,op)) {
+		case NE:  printf("NE\n"); break;
+		case EQ:  printf("EQ\n"); break;
+		case LT:  printf("LT\n"); break;
+		case LE:  printf("LE\n"); break;
+		case GE:  printf("GE\n"); break;
+		case GT:  printf("GT\n"); break;
+		case ADD: printf("ADD\n"); break;
+		case SUB: printf("SUB\n"); break;
+		case MUL: printf("MUL\n"); break;
+		case DIV: printf("DIV\n"); break;
+		case MOD: printf("MOD\n"); break;
+		default:  assert(!"this cannot happen");
+	    }
+	    printlnObject(get(node, Binop,lhs), indent+1);
+	    printlnObject(get(node, Binop,rhs), indent+1);
+	    break;
+	}
+	case Unyop: {
+	    switch (get(node, Unyop,op)) {
+		case NEG: printf("NEG\n"); break;
+		case NOT: printf("NOT\n"); break;
+		default:  assert(!"this cannot happen");
+	    }
+	    printlnObject(get(node, Unyop,rhs), indent+1);
+	    break;
+	}
+	case GetVar: {
+	    printf("GetVar %s\n", get(get(node, GetVar,id), Symbol,name));
+	    break;
+	}
+	case SetVar: {
+	    printf("SetVar %s\n", get(get(node, SetVar,id), Symbol,name));
+	    printlnObject(get(node, SetVar,rhs), indent+1);
+	    break;
+	}
+	case GetArray: {
+	    printf("GetArray\n");
+	    printlnObject(get(node, GetArray,array), indent+1);
+	    printlnObject(get(node, GetArray,index), indent+1);
+	    break;
+	}
+	case SetArray: {
+	    printf("SetArray\n");
+	    printlnObject(get(node, SetArray,array), indent+1);
+	    printlnObject(get(node, SetArray,index), indent+1);
+	    printlnObject(get(node, SetArray,value), indent+1);
+	    break;
+	}
+	case Call: {
+	    printf("Call\n");
+	    printlnObject(get(node, Call,function), indent+1);
+	    printlnObject(get(node, Call,arguments), indent+1);
+	    break;
+	}
+	case Return: {
+	    printf("Return\n");
+	    printlnObject(get(node, Return,value), indent+1);
+	    break;
+	}
+	case Break: {
+	    printf("Break\n");
+	    break;
+	}
+	case Continue: {
+	    printf("Continue\n");
+	    break;
+	}
+	case Print: {
+	    printf("Print\n");
+	    printlnObject(get(node, Print,arguments), indent+1);
+	    break;
+	}
+	case If: {
+	    printf("If\n");
+	    printlnObject(get(node, If,condition), indent+1);
+	    printlnObject(get(node, If,statement1), indent+1);
+	    printlnObject(get(node, If,statement2), indent+1);
+	    break;
+	}
+	case While: {
+	    printf("While\n");
+	    printlnObject(get(node, While,condition), indent+1);
+	    printlnObject(get(node, While,statement), indent+1);
+	    break;
+	}
+	case Block: {
+	    printf("Block...\n");
+	    break;
+	}
+	default:
+	    assert(!"this cannot happen");
+    }
+}
+
+void println(oop obj)	{ printlnObject(obj, 0); }
+
+void print(oop node)
+{
+    switch (getType(node)) {
+	case Undefined:	printf("nil");				break;
+	case Integer:	printf("%d", Integer_value(node));	break;
+	case Float:	printf("%f", Float_value(node));	break;
+	case Symbol:	printf("%s", get(node, Symbol,name));	break;
+	default:	println(node);				break;
+    }
+}
+
+#define YYSTYPE oop
+
+YYSTYPE result;
+
+%}
+
+start	= - x:expr SEMI			  { result = x; }
+		| - SEMI				  { result = false; }
+		| !.                              { printf("\n%d objects allocated\n", nobj); result = 0; }
+		| < (!eol &. .)* >                { fatal("syntax error: %s", yytext); }
+
+
+expr	= assign
+
+assign  = i:id ASSIGN x:assign			{ $$ = newSetVar(i, x) }
+	| add
+
+
+add	= lhs:mul ( PLUS   rhs:mul	{ lhs = newBinop(ADD, lhs, rhs) }
+	  	  | MINUS  rhs:mul	{ lhs = newBinop(SUB, lhs, rhs) }
+	  	  )*			{ $$ = lhs }
+
+mul	= lhs:value ( STAR  rhs:value	{ lhs = newBinop(MUL, lhs, rhs) }
+	  	     | SLASH rhs:value	{ lhs = newBinop(DIV, lhs, rhs) }
+	  	     | PCENT rhs:value	{ lhs = newBinop(MOD, lhs, rhs) }
+	  	     )*			{ $$ = lhs }
+
+
+
+
+value	= LPAR lhs:expr  RPAR		{ $$ = lhs }
+	| integer
+	| i:id				{ $$ = newGetVar(i) }
+
+
+
+
+integer	= < [0-9]+ > -  		{ $$ = newInteger(atoi(yytext)) }
+
+id	= < alpha alnum* > -		{ $$ = intern(yytext) }
+
+alpha	= [a-zA-Z_]
+alnum	= [a-zA-Z_0-9]
+
+
+-	= blank*
+
+blank	= [ \t\n\r]
+	| '//' (![\n\r] .)*
+
+eol	= [\r\n]
+
+
+SEMI	= ";"       -
+ASSIGN	= "=" !"="  -
+
+PLUS	= "+" 	    -
+MINUS	= "-" 	    -
+STAR	= "*" 	    -
+SLASH	= "/" 	    -
+PCENT	= "%" 	    -
+LPAR	= "(" 	    -
+RPAR	= ")" 	    -
+
+
+%%;
+
+
+
+jmp_buf *nlrs = 0;
+int nnlrs     = 0;
+oop nlrval    = 0;
+
+
+#define nlrReturn(N) longjmp(nlrs[nnlrs-1], N)
+
+#define nlrPop() --nnlrs
+
+
+#undef BINOP
+
+
+
+// virtual machine
+
+enum {
+    iHALT, iPUSH,
+    iADD, iSUB, iMUL, iDIV, iMOD,
+    iGETVAR, iSETVAR,
+	iMKSPACE,
+	iPRINT,
+};
+
+
+
+
+
+
+struct IntArray{
+	int *elements;
+	int size, capacity;
+};
+typedef struct IntArray *iptr;
+
+iptr stack = 0;
+
+iptr intArray_init()
+{
+	struct IntArray *a = malloc(sizeof(struct IntArray));
+	a->elements = (int*)malloc(sizeof(int) * 4);
+	a->size     = 0;
+	a->capacity = 4;
+	return a;
+}
+
+void intArray_append(struct IntArray *a, int value)
+{
+	if (a->size >= a->capacity) {
+		a->capacity = a->capacity ? a->capacity * 2 : 4;
+		a->elements = realloc(a->elements, sizeof(int) * a->capacity);
+	}
+	a->elements[a->size++] = value;
+}
+int intArray_pop(struct IntArray *a)
+{
+	if (a->size == 0) fatal("pop: stack is empty");
+	return a->elements[--a->size];
+}
+int intArray_last(struct IntArray *a)
+{
+	if (a->size == 0) fatal("last: stack is empty");
+	return a->elements[a->size - 1];
+}
+
+
+#define push(O)	intArray_append(stack, O)
+#define pop()	intArray_pop(stack)
+#define top()	intArray_last(stack)
+
+
+iptr execute(iptr prog,iptr stack)
+{
+    int* code = prog->elements;
+	int size = prog->size;
+
+    int* webanswer = NULL;
+	int webanswersize = 0;
+
+    int pc = 0;
+# define fetch()	code[pc++]
+
+    for (;;) {
+	int op = fetch();
+	int l = 0, r = 0;
+	switch (op) {
+		case iMKSPACE:{
+			printf("iMKSPACE\n");
+			int nvars = fetch();
+			for (int i = 0;  i < nvars;  ++i) {
+				push(0); // reserve space for local variables
+			}
+			continue;
+		}
+	    case iHALT:{
+			printf("iHALT\n");
+			free(stack->elements); // free the stack elements
+			free(stack); // free the stack itself
+			
+			iptr ans = malloc(sizeof(struct IntArray));
+			ans->elements = webanswer;
+			ans->size = webanswersize;
+			printf("webanswer\n");
+			for (int i = 0;  i < webanswersize;  ++i) {
+				printf("%d = %d\n", i, webanswer[i]);
+			}
+			return ans; // return the answer
+		}
+	    case iADD:printf("iADD\n");  r = pop();  l = pop();  push(l + r);  continue;
+	    case iSUB:printf("iSUB\n");  r = pop();  l = pop();  push(l - r);  continue;
+	    case iMUL:printf("iMUL\n");  r = pop();  l = pop();  push(l * r);  continue;
+	    case iDIV:printf("iDIV\n");  r = pop();  l = pop();  push(l / r);  continue;
+	    case iMOD:printf("iMOD\n");  r = pop();  l = pop();  push(l % r);  continue;
+	    case iGETVAR:{
+			printf("iGETVAR\n");
+			int symIndex = fetch(); // need to change
+			push(stack->elements[symIndex]);
+			continue;
+		}	    
+	    case iSETVAR:{
+			printf("iSETVAR\n");
+			int symIndex = fetch();//need to change
+			stack->elements[symIndex] = top();
+			continue;
+		}	
+		case iPUSH:{
+		printf("iPUSH\n");
+			l = fetch();
+			push(l);
+			continue;
+		}
+		case iPRINT:{
+			printf("iPRINT\n");
+			printf("ans = %d\n", top());
+			if(webanswer){
+				printf("webanswer already exists, appending to it\n");
+				webanswer = (int*)realloc(webanswer, sizeof(int) * (webanswersize + 1));
+				webanswer[webanswersize++] = pop();
+			}
+			else{
+				printf("webanswer does not exist, creating new one\n");
+				webanswer = (int*)malloc(sizeof(int));
+				webanswer[0] = pop();
+				webanswersize = 1;
+			}
+			continue;
+		}
+		continue;
+	    default:fatal("illegal instruction %d", op);
+	}
+	}
+# undef fetch
+# undef push
+# undef pop
+    return 0; // should never reach here
+}
+
+// AST->VM compiler
+
+iptr compile();
+oop *variables = 0;
+int nvariables = 0;
+
+int insertVariable(oop sym)
+{
+	// linear search for existing variable
+	for (int i = 0;  i < nvariables;  ++i)
+	if (variables[i] == sym) return i;
+	variables = realloc(variables, sizeof(*variables) * (nvariables + 1));
+	variables[nvariables++] = sym;
+	return nvariables - 1;
+}
+int searchVariable(oop sym)
+{
+	// linear search for existing variable
+	for (int i = 0;  i < nvariables;  ++i)
+	if (variables[i] == sym) return i;
+	return -1;
+}
+
+void emitL (iptr array, oop object) 	  { intArray_append(array, Integer_value(object)); }
+void emitI (iptr array, int i     ) 	  { intArray_append(array, i); }
+void emitII(iptr array, int i, int j)      { emitI(array, i); emitI(array, j); }
+void emitIL(iptr array, int i, oop object) { emitI(array, i); emitL(array, object); }
+
+void emitOn(iptr prog, oop ast)
+{
+    switch (getType(ast)) {
+		case Undefined:
+		case Integer:{
+			emitIL(prog, iPUSH, ast);
+			return;
+		}
+		case Binop:{
+			emitOn(prog, get(ast, Binop,lhs));
+			emitOn(prog, get(ast, Binop,rhs));
+			switch (get(ast, Binop,op)) {
+			case ADD: emitI(prog, iADD);  return;
+			case SUB: emitI(prog, iSUB);  return;
+			case MUL: emitI(prog, iMUL);  return;
+			case DIV: emitI(prog, iDIV);  return;
+			case MOD: emitI(prog, iMOD);  return;
+			default:printf("error\n");return;
+			}
+			break;
+		}
+		case GetVar: {
+			oop sym = get(ast, GetVar,id);
+			int symIndex = searchVariable(sym);
+			if (symIndex < 0) {
+				printf("variable %s not found\n", get(sym, Symbol,name));
+				exit(1);
+			}
+			emitII(prog, iGETVAR, symIndex);
+			return;
+		}
+		case SetVar: {
+			oop sym = get(ast, SetVar,id);
+			oop rhs = get(ast, SetVar,rhs);
+			emitOn(prog, rhs);
+			int symIndex = insertVariable(sym);
+			emitII(prog, iSETVAR, symIndex);
+			return;
+		}
+		default:break;
+    }
+    fatal("emitOn: unimplemented emitter for type %d", getType(ast));
+}
+
+void printCode(iptr code){
+	for (int i = 0;  i < code->size;  ++i) {
+		int op = code->elements[i];
+		switch (op) {
+			case iHALT: printf("%03d: HALT\n", i); break;
+			case iPUSH: ++i;printf("%03d: LOAD %03d\n", i-1, code->elements[i]); break;
+			case iADD:  printf("%03d: ADD\n", i); break;
+			case iSUB:  printf("%03d: SUB\n", i); break;
+			case iMUL:  printf("%03d: MUL\n", i); break;
+			case iDIV:  printf("%03d: DIV\n", i); break;
+			case iMOD:  printf("%03d: MOD\n", i); break;
+			case iGETVAR:
+			++i;
+			printf("%03d: GETVAR %03d\n", i-1, code->elements[i]);
+			break;
+			case iSETVAR:
+			++i;
+			printf("%03d: SETVAR %03d\n", i-1, code->elements[i]);
+			break;
+			case iMKSPACE:
+			++i;
+			printf("%03d: MKSPACE %03d\n", i-1, code->elements[i]);
+			break;
+			case iPRINT:
+			printf("%03d: PRINT\n", i);
+			break;
+			default:
+			printf("%03d: UNKNOWN %03d\n", i, op);
+		}
+	}
+	printf("\n");
+}
+
+iptr compile()
+{
+    iptr prog = intArray_init();
+
+	emitII(prog, iMKSPACE, 0); // reserve space for local variables
+
+	// compile the AST into the program code
+	int line = 1;
+	while(yyparse()){
+		if (result == 0) {
+			break;
+		}
+		emitOn(prog, result);
+		emitI(prog, iPRINT); // print the result
+		printf("line %3d: compile one statement %d\n",++line, prog->size);
+	}
+    emitI (prog, iHALT); // end of program
+	prog->elements[1] = nvariables; // store number of variables
+#ifndef __EMSCRIPTEN__
+	printf("\ncompile finished, %d statements, code size %d bytes\n\n", line, 4 * prog->size);
+#endif
+    return prog;
+}
+
+/* --------------------------------- *
+	 * WebVM関連のコード
+ * --------------------------------- */
+
+
+iptr webcode = 0;     // コンパイル結果を保持するグローバル変数
+iptr webresults = 0;  // VMの実行結果を保持するグローバル変数
+
+// web_compile_size() と web_compile() は現状のままで良いと仮定します。
+int web_compile_size() {
+    // 以前のコンパイル結果や実行結果が残っていれば解放
+    if (webcode) {
+        printf("Freeing previous webcode\n");
+        free(webcode);
+        webcode = 0;
+    }
+    if (webresults) {
+		printf("Freeing previous webresults\n");
+        free(webresults);
+        webresults = 0;
+    }
+	printf("call web_compile_size\n");
+    webcode = compile();
+	printf("end of web_compile_size %d\n", webcode ? webcode->size : 0);
+    return webcode ? webcode->size : 0;
+}
+
+int* web_compile() {
+	printf("call web_compile\n");
+	printCode(webcode);
+	printf("end of web_compile %d\n",webcode ? webcode->size : 0);
+    return webcode ? webcode->elements : NULL;
+}
+
+// VMを実行し、結果の「サイズ」を返すように修正
+// 引数としてコードのポインタとサイズを受け取る
+int web_vm_execute_size(int* code_ptr, int code_size) {
+	printf("call web_vm_execute_size\n");
+    // 以前の実行結果が残っていれば解放
+    if (webresults) {
+        free(webresults);
+        webresults = 0;
+    }
+    iptr prog = malloc(sizeof(struct IntArray)); // IntArrayの構造を仮定
+    if (!prog) return 0; // メモリ確保失敗
+
+    prog->elements = code_ptr;
+    prog->size = code_size;
+
+    // 正しく設定した prog をVMに渡して実行
+    webresults = execute(prog, intArray_init());
+
+    // execute関数がprog自体を消費しない場合、ここで解放
+    // (prog->elementsはJS側のメモリなので解放しない)
+	printf("end of web_vm_execute_size %d\n", webresults ? webresults->size : 0);
+    return webresults ? webresults->size : 0;
+}
+
+// VMの実行結果のデータポインタを返す
+// (web_vm_execute_size によって webresults は設定済みのはず)
+int* web_vm_execute() {
+	printf("call web_vm_execute\n");
+	printf("web_vm_execute: webresults size = %d\n", webresults ? webresults->size : 0);
+    return webresults ? webresults->elements : NULL;
+}
+
+/* --------------------------------- *
+	 * WebVM関連のコード
+ * --------------------------------- */
+
+#ifndef __EMSCRIPTEN__
+int main(int argc, char **argv)
+{
+#if TAGFLT
+    assert(sizeof(double) == sizeof(intptr_t));
+#endif
+
+    nil   = newObject(Undefined);
+    false = newInteger(0);
+    true  = newInteger(1);
+
+    nlrval = nil;
+
+
+	iptr code = compile();
+	printCode(code);
+    stack = intArray_init();
+	execute(code, stack);
+}
+#endif

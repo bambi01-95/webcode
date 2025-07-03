@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <title>Shica</title>
+
+    <!-- CodeMirror CDN -->
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/lib/codemirror.min.css"
+    />
+    <script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/lib/codemirror.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/mode/javascript/javascript.min.js"></script>
+
+    <!-- スタイル -->
+    <style>
+      body {
+        background-color: #f5f7fa;
+        font-family: "Segoe UI", sans-serif;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        height: 100vh;
+        margin: 0;
+      }
+
+      .container {
+        position: relative; /* ←追加 */
+        background-color: white;
+        padding: 24px;
+        border-radius: 12px;
+        box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+        width: 90%;
+        max-width: 700px;
+      }
+
+      h1 {
+        text-align: center;
+        margin-top: 0;
+      }
+
+      .editor-box {
+        border: 1px solid #ccc;
+        border-radius: 8px;
+        padding: 8px;
+        background-color: #f9f9f9;
+        margin-bottom: 16px;
+      }
+
+      .CodeMirror {
+        height: 200px;
+        font-family: monospace;
+        font-size: 14px;
+      }
+
+      .buttons {
+        display: flex;
+        justify-content: center;
+        gap: 12px;
+        margin-bottom: 16px;
+      }
+
+      button {
+        background-color: #4a90e2;
+        color: white;
+        border: none;
+        padding: 10px 20px;
+        font-size: 16px;
+        border-radius: 6px;
+        cursor: pointer;
+        transition: background-color 0.2s ease, transform 0.1s ease;
+      }
+
+      button:hover {
+        background-color: #357abd;
+        transform: translateY(-2px);
+      }
+
+      pre#output {
+        background: #eee;
+        padding: 10px;
+        border-radius: 8px;
+        white-space: pre-wrap;
+        min-height: 40px;
+      }
+      .shica-label {
+        position: absolute;
+        bottom: 16px;
+        right: 24px;
+        font-size: 0.85em;
+        color: #999;
+        font-style: italic;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>Demonstration of an Interpreter<br />Implemented in C and Leg</h1>
+
+      <div class="editor-box">
+        <textarea id="inputText"></textarea>
+      </div>
+      <div class="buttons">
+        <button id="storeBtn">Load</button>
+        <button id="runBtn">▶ Run</button>
+      </div>
+
+      <pre id="output">The output will be displayed here</pre>
+
+      <div class="shica-label">Shica lang.</div>
+    </div>
+
+    <script>
+      var ptr = null;
+      var editor = null;
+
+      var Module = {
+        onRuntimeInitialized: function () {
+          editor = CodeMirror.fromTextArea(
+            document.getElementById("inputText"),
+            {
+              lineNumbers: true,
+              mode: "javascript",
+              theme: "default",
+            }
+          );
+
+          document
+            .getElementById("storeBtn")
+            .addEventListener("click", function () {
+              const input = editor.getValue();
+              if (ptr) {
+                Module._free(ptr);
+              }
+              ptr = Module.allocateUTF8(input);
+              const ok = Module.ccall("store", "number", ["number"], [ptr]);
+              document.getElementById("output").innerText = ok
+                ? "Successfully stored input"
+                : "Failed to store input";
+            });
+
+          document
+            .getElementById("runBtn")
+            .addEventListener("click", function () {
+              const result = Module.ccall("get_result", "number", [], []);
+              document.getElementById("output").innerText = "result: " + result;
+            });
+        },
+      };
+    </script>
+
+    <!-- あなたの Emscripten コンパイル済みJS -->
+    <script src="compiler.js"></script>
+  </body>
+</html>

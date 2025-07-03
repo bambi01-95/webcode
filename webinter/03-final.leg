@@ -1,0 +1,105 @@
+%{
+;
+
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+#include <ctype.h>
+
+int *variables = 0;
+
+struct Symbol {
+    char *name;
+    int   index;  // 0... generated for each new symbol name
+};
+
+typedef struct Symbol Symbol;
+
+int nextIndex = 0;
+
+Symbol **symbols = 0;
+int     nsymbols = 0;
+
+Symbol *newSymbol(char *name)
+{
+    Symbol *sym = calloc(1, sizeof(*sym));
+    sym->name  = strdup(name);
+    sym->index = nextIndex++;
+    return sym;
+}
+
+Symbol *intern(char *name)
+{
+    // linear search for existing symbol
+    for (int i = 0;  i < nsymbols;  ++i)
+	if (!strcmp(symbols[i]->name, name))
+	    return symbols[i];
+    symbols   = realloc(symbols,   sizeof(*symbols)   * (nsymbols + 1));
+    variables = realloc(variables, sizeof(*variables) * (nsymbols + 1));
+    return symbols[nsymbols++] = newSymbol(name);
+}
+
+#define YYSTYPE int
+
+YYSTYPE result;
+
+%}
+
+start	= - x:expr ";"			{ result = x }
+
+expr	= assign
+
+assign  = i:id EQUAL x:expr		{ $$ = variables[i] = x }
+	| add
+
+add	= lhs:mul ( PLUS  rhs:mul	{ lhs += rhs }
+	  	  | MINUS rhs:mul	{ lhs -= rhs }
+	  	  )*			{ $$ = lhs }
+
+mul	= lhs:unary (  STAR  rhs:unary	{ lhs *= rhs }
+	  	     | SLASH rhs:unary	{ lhs /= rhs }
+	  	     | PCENT rhs:unary	{ lhs %= rhs }
+	  	     )*			{ $$ = lhs }
+
+unary   = MINUS lhs:unary		{ $$ = -lhs }
+	| PLING lhs:unary		{ $$ = !lhs }
+	| value
+
+value	= LPAR lhs:add RPAR		{ $$ =  lhs }
+	| integer
+	| i:id				{ $$ = variables[i] }
+
+integer	= < [0-9]+ > -  		{ $$ = atoi(yytext) }
+
+id	= < alpha alnum* > -		{ $$ = intern(yytext)->index }
+
+alpha	= [a-zA-Z_]
+alnum	= [a-zA-Z_0-9]
+
+-	= blank*
+
+blank	= [ \t\n\r]
+	| '//' (![\n\r] .)*
+
+EQUAL	= "=" -
+PLUS	= "+" -
+MINUS	= "-" -
+STAR	= "*" -
+SLASH	= "/" -
+PCENT	= "%" -
+LPAR	= "(" -
+RPAR	= ")" -
+PLING	= "!" -
+
+%%
+
+#include <stdio.h>
+
+int main()
+{
+    while (yyparse())
+	printf("%d\n", result);
+
+    return 0;
+}
+
